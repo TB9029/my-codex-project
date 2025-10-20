@@ -307,6 +307,9 @@
     position: absolute;
     inset: 0;
     pointer-events: none;
+    width: 100%;
+    height: 100%;
+    display: block;
   }
 
   .scan-placeholder {
@@ -318,6 +321,58 @@
     font-weight: 600;
     background: rgba(8, 12, 18, 0.6);
     color: #fff;
+    padding: 12px;
+    text-align: center;
+  }
+
+  .scan-status {
+    margin-bottom: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .scan-status-text {
+    font-weight: 600;
+    font-size: 1rem;
+    transition: color var(--transition-fast);
+  }
+
+  .scan-status-text[data-tone='info'] {
+    color: var(--color-primary);
+  }
+
+  .scan-status-text[data-tone='success'] {
+    color: var(--color-success);
+  }
+
+  .scan-status-text[data-tone='warning'] {
+    color: var(--color-warning);
+  }
+
+  .scan-status-text[data-tone='caution'] {
+    color: var(--color-caution);
+  }
+
+  .scan-status-text[data-tone='danger'] {
+    color: var(--color-danger);
+  }
+
+  .scan-status-text[data-tone='muted'] {
+    color: var(--color-muted);
+  }
+
+  .scan-hint {
+    font-size: 0.85rem;
+    color: var(--color-muted);
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity var(--transition-fast), transform var(--transition-fast);
+  }
+
+  .scan-hint.visible {
+    opacity: 1;
+    transform: translateY(0);
   }
 
   .manual-input label {

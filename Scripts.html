@@ -13,6 +13,12 @@
         reader: null,
         stream: null,
         deviceId: null
+      },
+      scan: {
+        stage: 'idle',
+        hintTimer: null,
+        overlayTimer: null,
+        resetTimer: null
       }
     };
 
@@ -51,6 +57,8 @@
       cameraPreview: document.getElementById('camera-preview'),
       cameraOverlay: document.getElementById('camera-overlay'),
       scanPlaceholder: document.getElementById('scan-placeholder'),
+      scanStatus: document.getElementById('scan-status-text'),
+      scanHint: document.getElementById('scan-hint'),
       tabButtons: document.querySelectorAll('.tab-btn'),
       tabPanels: document.querySelectorAll('.tab-panel')
     };
@@ -66,9 +74,14 @@
       bindQueueControls();
       bindManualInput();
       bindNetworkEvents();
+      window.addEventListener('resize', syncOverlaySize);
+      if (els.cameraPreview) {
+        els.cameraPreview.addEventListener('loadedmetadata', syncOverlaySize);
+      }
       renderQueue();
       loadBootstrap();
       switchView('dashboard');
+      setScanStage('idle');
     }
 
     function loadBootstrap() {
@@ -283,7 +296,10 @@
       els.manualSubmit.addEventListener('click', () => {
         const raw = els.manualCode.value.trim();
         if (!raw) return;
-        processScan(raw);
+        processScan(raw, {
+          processingMessage: '⌨️ 手入力データを送信中...',
+          processingOverlay: '⌨️ 手入力処理中…'
+        });
         els.manualCode.value = '';
       });
       els.manualCode.addEventListener('keydown', evt => {
@@ -563,6 +579,175 @@
         .updateConstant({ id: item.id, month, value: num });
     }
 
+    function setScanStage(stage, options = {}) {
+      if (state.scan.resetTimer) {
+        clearTimeout(state.scan.resetTimer);
+        state.scan.resetTimer = null;
+      }
+      const defaults = {
+        idle: { message: 'カメラを起動するとスキャンできます', tone: 'muted' },
+        initializing: { message: 'カメラ初期化中…', tone: 'info' },
+        ready: {
+          message: '📷 カメラ準備完了。バーコードを枠内に収めてください',
+          tone: 'info'
+        },
+        active: { message: '🔍 読み取り中…', tone: 'info' },
+        processing: { message: '☁️ 読み取りデータを処理中…', tone: 'info' },
+        success: { message: '✅ 読み取り完了', tone: 'success' },
+        queued: {
+          message: '📦 オフラインのためキューに保存しました',
+          tone: 'warning'
+        },
+        error: {
+          message: '⚠️ 読み取りに失敗しました。位置や明るさを調整してください',
+          tone: 'danger'
+        }
+      };
+      const preset = defaults[stage] || {};
+      const message = options.message || preset.message || '';
+      const tone = options.tone || preset.tone || 'info';
+      state.scan.stage = stage;
+      updateScanStatus(message, tone);
+      if (stage === 'active') {
+        clearOverlay();
+        scheduleScanHint();
+      } else if (stage === 'ready') {
+        clearOverlay();
+        clearScanHint();
+      } else if (stage === 'idle' || stage === 'initializing') {
+        clearScanHint();
+        clearOverlay();
+      } else {
+        clearScanHint();
+      }
+    }
+
+    function updateScanStatus(message, tone) {
+      if (!els.scanStatus) return;
+      els.scanStatus.textContent = message;
+      els.scanStatus.dataset.tone = tone || 'info';
+    }
+
+    function scheduleScanHint(delay = 8000) {
+      clearScanHintTimer();
+      if (state.scan.stage !== 'active') return;
+      state.scan.hintTimer = setTimeout(() => {
+        showScanHint('読み取りづらい場合は距離や角度、周囲の明るさを調整してください。必要に応じて手入力もご利用いただけます。');
+      }, delay);
+    }
+
+    function showScanHint(text) {
+      if (!els.scanHint) return;
+      els.scanHint.textContent = text;
+      els.scanHint.classList.add('visible');
+    }
+
+    function clearScanHint() {
+      clearScanHintTimer();
+      if (!els.scanHint) return;
+      els.scanHint.textContent = '';
+      els.scanHint.classList.remove('visible');
+    }
+
+    function clearScanHintTimer() {
+      if (state.scan.hintTimer) {
+        clearTimeout(state.scan.hintTimer);
+        state.scan.hintTimer = null;
+      }
+    }
+
+    function scheduleReturnToActive(delay = 2000) {
+      if (state.scan.resetTimer) {
+        clearTimeout(state.scan.resetTimer);
+      }
+      state.scan.resetTimer = setTimeout(() => {
+        state.scan.resetTimer = null;
+        if (state.currentView === 'scan' && state.camera.stream) {
+          setScanStage('active');
+        } else {
+          setScanStage('idle');
+        }
+      }, delay);
+    }
+
+    function clearScanTimers() {
+      clearScanHintTimer();
+      if (state.scan.overlayTimer) {
+        clearTimeout(state.scan.overlayTimer);
+        state.scan.overlayTimer = null;
+      }
+      if (state.scan.resetTimer) {
+        clearTimeout(state.scan.resetTimer);
+        state.scan.resetTimer = null;
+      }
+    }
+
+    function syncOverlaySize() {
+      if (!els.cameraOverlay || !els.cameraPreview) return;
+      const video = els.cameraPreview;
+      const canvas = els.cameraOverlay;
+      const width = video.videoWidth || video.clientWidth;
+      const height = video.videoHeight || video.clientHeight;
+      if (!width || !height) return;
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+    }
+
+    function drawOverlayMessage(title, tone = 'info', subtitle = '') {
+      if (!els.cameraOverlay) return;
+      const canvas = els.cameraOverlay;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      syncOverlaySize();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const toneColors = {
+        info: 'rgba(44, 123, 229, 0.75)',
+        success: 'rgba(43, 191, 106, 0.78)',
+        warning: 'rgba(255, 180, 0, 0.78)',
+        caution: 'rgba(249, 214, 92, 0.78)',
+        danger: 'rgba(255, 77, 109, 0.78)',
+        muted: 'rgba(12, 16, 24, 0.65)'
+      };
+      const color = toneColors[tone] || toneColors.info;
+      const titleText = title && title.length > 28 ? `${title.slice(0, 28)}…` : title;
+      const subtitleText = subtitle && subtitle.length > 32 ? `${subtitle.slice(0, 32)}…` : subtitle;
+      const boxHeight = subtitleText ? canvas.height * 0.32 : canvas.height * 0.26;
+      const top = (canvas.height - boxHeight) / 2;
+      ctx.fillStyle = color;
+      ctx.fillRect(0, top, canvas.width, boxHeight);
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      const baseFont = Math.max(24, canvas.width * 0.06);
+      ctx.font = `700 ${baseFont}px "Noto Sans JP", sans-serif`;
+      ctx.fillText(titleText, canvas.width / 2, top + boxHeight / 2 - (subtitleText ? baseFont * 0.2 : 0));
+      if (subtitleText) {
+        const subFont = Math.max(18, canvas.width * 0.04);
+        ctx.font = `500 ${subFont}px "Noto Sans JP", sans-serif`;
+        ctx.fillText(subtitleText, canvas.width / 2, top + boxHeight / 2 + subFont * 1.1);
+      }
+      if (state.scan.overlayTimer) {
+        clearTimeout(state.scan.overlayTimer);
+      }
+      state.scan.overlayTimer = setTimeout(() => {
+        clearOverlay();
+      }, 1800);
+    }
+
+    function clearOverlay() {
+      if (!els.cameraOverlay) return;
+      const ctx = els.cameraOverlay.getContext('2d');
+      if (!ctx) return;
+      ctx.clearRect(0, 0, els.cameraOverlay.width, els.cameraOverlay.height);
+    }
+
+    function ensureActiveScanning() {
+      if (state.scan.stage === 'ready' || state.scan.stage === 'initializing') {
+        setScanStage('active');
+      }
+    }
+
     function startCamera() {
       if (state.camera.stream) {
         return;
@@ -570,13 +755,18 @@
       if (!navigator.mediaDevices || !window.ZXing) {
         els.scanPlaceholder.textContent = 'カメラを利用できません';
         els.scanPlaceholder.classList.remove('hidden');
+        setScanStage('error', {
+          message: 'カメラ機能が利用できません。対応端末または対応ブラウザで開いてください。',
+          tone: 'danger'
+        });
         return;
       }
       if (!state.camera.reader) {
         state.camera.reader = new ZXing.BrowserMultiFormatReader();
       }
-      stopCamera(true);
-      els.scanPlaceholder.textContent = 'カメラ初期化中...';
+      setScanStage('initializing');
+      stopCamera(true, true);
+      els.scanPlaceholder.textContent = 'カメラ初期化中…';
       els.scanPlaceholder.classList.remove('hidden');
       const constraints = {
         video: {
@@ -593,6 +783,8 @@
         })
         .then(() => {
           els.scanPlaceholder.classList.add('hidden');
+          syncOverlaySize();
+          setScanStage('ready');
           return state.camera.reader.decodeFromVideoElement(
             els.cameraPreview,
             (result, err) => {
@@ -601,6 +793,8 @@
               }
               if (result) {
                 handleCameraResult(result.getText());
+              } else if (err instanceof ZXing.NotFoundException) {
+                ensureActiveScanning();
               } else if (err && !(err instanceof ZXing.NotFoundException)) {
                 console.error(err);
               }
@@ -610,7 +804,7 @@
           );
         })
         .catch(error => {
-          stopCamera();
+          stopCamera(false);
           if (error && error.name === 'NotAllowedError') {
             els.scanPlaceholder.textContent = 'カメラへのアクセスが許可されませんでした。ブラウザの設定をご確認ください。';
           } else if (error && error.name === 'NotFoundError') {
@@ -618,6 +812,10 @@
           } else {
             els.scanPlaceholder.textContent = 'カメラ初期化に失敗しました';
           }
+          setScanStage('error', {
+            message: 'カメラの初期化に失敗しました。権限や他のアプリの使用状況をご確認ください。',
+            tone: 'danger'
+          });
           showError(error);
         });
     }
@@ -640,7 +838,7 @@
       });
     }
 
-    function stopCamera(keepPlaceholder = false) {
+    function stopCamera(keepPlaceholder = false, skipStageUpdate = false) {
       if (state.camera.reader) {
         try {
           state.camera.reader.reset();
@@ -661,9 +859,14 @@
       if (els.cameraPreview) {
         els.cameraPreview.srcObject = null;
       }
+      clearScanTimers();
+      clearOverlay();
       if (!keepPlaceholder && els.scanPlaceholder) {
         els.scanPlaceholder.classList.remove('hidden');
-        els.scanPlaceholder.textContent = 'カメラ初期化中...';
+        els.scanPlaceholder.textContent = 'カメラは停止中です';
+      }
+      if (!skipStageUpdate) {
+        setScanStage('idle');
       }
     }
 
@@ -676,16 +879,28 @@
       processScan(text);
     }
 
-    function processScan(raw) {
+    function processScan(raw, options = {}) {
+      const processingMessage = options.processingMessage || '☁️ 読み取りデータを処理中…';
+      const processingTone = options.processingTone || 'info';
+      const overlayText = options.processingOverlay || '📤 読み取り中…';
+      setScanStage('processing', { message: processingMessage, tone: processingTone });
+      drawOverlayMessage(overlayText, processingTone);
       if (!navigator.onLine) {
         queueScan(raw);
         showToast('オフラインのためキューに保存しました');
         renderQueue();
+        setScanStage('queued', {
+          message: '📦 オフラインのためキューに保存しました（接続復帰で自動送信）',
+          tone: 'warning'
+        });
+        drawOverlayMessage('📦 オフライン保存', 'warning', 'オンライン復帰後に送信します');
+        scheduleReturnToActive(2600);
         return;
       }
       google.script.run
         .withSuccessHandler(result => {
           displayScanResult(result);
+          presentScanOutcome(result);
           playFeedback(result.status);
           refreshDashboard();
           flushQueue();
@@ -695,6 +910,19 @@
           if (!navigator.onLine) {
             queueScan(raw);
             renderQueue();
+            setScanStage('queued', {
+              message: '📦 オフラインのためキューに保存しました（接続復帰で自動送信）',
+              tone: 'warning'
+            });
+            drawOverlayMessage('📦 オフライン保存', 'warning', 'オンライン復帰後に送信します');
+            scheduleReturnToActive(2600);
+          } else {
+            setScanStage('error', {
+              message: '⚠️ 読み取り結果の送信に失敗しました。再度お試しください。',
+              tone: 'danger'
+            });
+            drawOverlayMessage('⚠️ 送信失敗', 'danger');
+            scheduleReturnToActive(2600);
           }
         })
         .recordScan({ raw });
@@ -718,6 +946,28 @@
         field.textContent = map[key] || '-';
       });
       els.resultCard.dataset.status = result.status ? result.status.code : '';
+    }
+
+    function presentScanOutcome(result) {
+      const status = result.status || {};
+      const toneMap = {
+        expired: 'danger',
+        lt1m: 'warning',
+        lt2m: 'caution',
+        ok: 'success',
+        'no-data': 'info'
+      };
+      const tone = toneMap[status.code] || 'info';
+      const icon = status.icon || '✅';
+      const label = status.label || '読み取り完了';
+      const product = result.master ? result.master.name : 'マスタ未登録の商品';
+      const overlayProduct = product && product.length > 24 ? `${product.slice(0, 24)}…` : product;
+      setScanStage('success', {
+        message: `${icon} ${label} - 次のバーコードを読み取ってください`,
+        tone: tone
+      });
+      drawOverlayMessage(`${icon} ${label}`, tone, overlayProduct);
+      scheduleReturnToActive(2200);
     }
 
     function playFeedback(status) {
