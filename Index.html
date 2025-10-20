@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>在庫チェックシステム</title>
+    <script src="https://unpkg.com/@zxing/library@0.20.0"></script>
+    <?!= include('Styles'); ?>
+  </head>
+  <body>
+    <div class="app" data-version="<?= appVersion ?>">
+      <header class="app-header">
+        <h1>在庫チェック</h1>
+        <p class="subtitle">スマホ対応 GS1 スキャン &amp; マスタ管理</p>
+        <div class="search-wrapper">
+          <input
+            id="global-search"
+            type="search"
+            placeholder="商品名・タグ・GS1 を検索"
+            autocomplete="off"
+          />
+          <button id="search-clear" class="icon-button" aria-label="検索をクリア">
+            ✖️
+          </button>
+        </div>
+        <nav class="primary-nav" aria-label="主要操作">
+          <button class="nav-btn" data-target="dashboard">🏠 ダッシュボード</button>
+          <button class="nav-btn" data-target="scan">📷 在庫チェック</button>
+          <button class="nav-btn" data-target="master">🗂️ マスタ管理</button>
+          <button class="nav-btn" data-target="constants">📊 商品定数</button>
+        </nav>
+      </header>
+
+      <main id="view-container">
+        <section id="view-dashboard" class="view" data-view="dashboard" aria-label="ダッシュボード">
+          <h2>日切れ間近</h2>
+          <div class="card-grid" role="list">
+            <article class="card status-danger" role="listitem">
+              <header>期限切れ</header>
+              <strong id="badge-expired">0</strong>
+            </article>
+            <article class="card status-warning" role="listitem">
+              <header>1か月未満</header>
+              <strong id="badge-lt1m">0</strong>
+            </article>
+            <article class="card status-caution" role="listitem">
+              <header>2か月未満</header>
+              <strong id="badge-lt2m">0</strong>
+            </article>
+          </div>
+          <section class="panel">
+            <header class="panel-header">
+              <h3>最新スキャン（10件）</h3>
+              <button class="refresh-btn" data-action="refresh-dashboard">🔄 再読込</button>
+            </header>
+            <ul id="recent-scans" class="scan-list" aria-live="polite"></ul>
+          </section>
+          <section class="panel">
+            <header class="panel-header">
+              <h3>検索結果</h3>
+            </header>
+            <ul id="search-results" class="search-list" aria-live="polite"></ul>
+          </section>
+        </section>
+
+        <section id="view-scan" class="view" data-view="scan" aria-label="在庫チェック">
+          <div class="scan-top">
+            <h2>GS1 スキャン</h2>
+            <div class="status-indicator" id="network-status">🔌 オンライン</div>
+          </div>
+          <div class="camera-container">
+            <video id="camera-preview" autoplay muted playsinline></video>
+            <canvas id="camera-overlay" class="overlay" aria-hidden="true"></canvas>
+            <div id="scan-placeholder" class="scan-placeholder">カメラ初期化中...</div>
+          </div>
+          <div class="manual-input">
+            <label for="manual-code">読み取り失敗時は手入力</label>
+            <div class="manual-row">
+              <input id="manual-code" type="text" inputmode="numeric" placeholder="例：(01)04912345678903(17)250101" />
+              <button id="manual-submit" class="primary">送信</button>
+            </div>
+          </div>
+          <article id="scan-result" class="result-card" aria-live="assertive">
+            <header>結果</header>
+            <div class="result-body">
+              <p class="result-line">商品: <span data-field="name">-</span></p>
+              <p class="result-line">期限: <span data-field="expiry">-</span></p>
+              <p class="result-line">判定: <span data-field="status">-</span></p>
+              <p class="result-line">ロット: <span data-field="lot">-</span></p>
+              <p class="result-line">シリアル: <span data-field="serial">-</span></p>
+            </div>
+          </article>
+          <section class="panel">
+            <header class="panel-header">
+              <h3>オフラインキュー</h3>
+              <button id="flush-queue" class="secondary">⏫ 送信</button>
+            </header>
+            <ul id="queue-list" class="queue-list"></ul>
+          </section>
+        </section>
+
+        <section id="view-master" class="view" data-view="master" aria-label="マスタ管理">
+          <div class="tabs" role="tablist">
+            <button class="tab-btn active" role="tab" data-tab="create">➕ 新規登録</button>
+            <button class="tab-btn" role="tab" data-tab="edit">📝 編集一覧</button>
+          </div>
+          <div class="tab-panel" data-tab="create" role="tabpanel">
+            <form id="master-form" novalidate>
+              <div class="form-grid">
+                <label>商品名<span class="required">*</span>
+                  <input name="name" type="text" required />
+                </label>
+                <label>GS1コード<span class="required">*</span>
+                  <input name="gs1" type="text" required />
+                </label>
+                <label>予備GS1コード1
+                  <input name="alt1" type="text" />
+                </label>
+                <label>予備GS1コード2
+                  <input name="alt2" type="text" />
+                </label>
+                <label>定数<span class="required">*</span>
+                  <input name="minimum" type="number" min="0" required />
+                </label>
+                <label>単位<span class="required">*</span>
+                  <select name="unit" required>
+                    <option value="個">個</option>
+                    <option value="箱">箱</option>
+                  </select>
+                </label>
+                <label>QTY<span class="required">*</span>
+                  <input name="qty" type="number" min="1" required />
+                </label>
+                <label>タグ（カンマ区切り）
+                  <input name="tags" type="text" placeholder="例：冷蔵,医薬品" />
+                </label>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="primary">登録</button>
+                <button type="reset" class="secondary">クリア</button>
+              </div>
+              <p class="form-message" id="master-form-message" aria-live="polite"></p>
+            </form>
+          </div>
+          <div class="tab-panel hidden" data-tab="edit" role="tabpanel">
+            <div class="toolbar">
+              <input id="master-search" type="search" placeholder="検索（商品名・タグ・GS1）" />
+              <select id="master-tag-filter">
+                <option value="">タグで絞り込み</option>
+              </select>
+              <div class="toolbar-actions">
+                <label class="csv-import">
+                  CSV インポート
+                  <input type="file" id="master-import" accept=".csv,text/csv" />
+                </label>
+                <button id="master-export" class="secondary">CSV エクスポート</button>
+              </div>
+            </div>
+            <div class="virtual-list" id="master-list" role="list"></div>
+            <dialog id="master-dialog">
+              <form method="dialog" id="master-edit-form">
+                <h3>マスタ編集</h3>
+                <input type="hidden" name="id" />
+                <label>商品名
+                  <input name="name" type="text" required />
+                </label>
+                <label>GS1コード
+                  <input name="gs1" type="text" required />
+                </label>
+                <label>予備GS1コード1
+                  <input name="alt1" type="text" />
+                </label>
+                <label>予備GS1コード2
+                  <input name="alt2" type="text" />
+                </label>
+                <label>定数
+                  <input name="minimum" type="number" min="0" required />
+                </label>
+                <label>単位
+                  <select name="unit" required>
+                    <option value="個">個</option>
+                    <option value="箱">箱</option>
+                  </select>
+                </label>
+                <label>QTY
+                  <input name="qty" type="number" min="1" required />
+                </label>
+                <label>タグ
+                  <input name="tags" type="text" />
+                </label>
+                <label class="toggle">
+                  <input type="checkbox" name="active" checked /> 有効
+                </label>
+                <menu>
+                  <button value="cancel">キャンセル</button>
+                  <button id="master-delete" class="danger" value="delete">削除</button>
+                  <button id="master-save" class="primary" value="default">保存</button>
+                </menu>
+              </form>
+            </dialog>
+          </div>
+        </section>
+
+        <section id="view-constants" class="view" data-view="constants" aria-label="商品定数">
+          <div class="toolbar">
+            <div class="toolbar-actions">
+              <label class="csv-import">
+                CSV インポート
+                <input type="file" id="constants-import" accept=".csv,text/csv" />
+              </label>
+              <button id="constants-export" class="secondary">CSV エクスポート</button>
+              <button id="constants-deficit" class="secondary">不足リスト出力</button>
+            </div>
+          </div>
+          <div class="constants-table" role="table">
+            <div class="constants-header" role="row">
+              <span role="columnheader">商品名</span>
+              <span role="columnheader">基準 (定数×QTY)</span>
+              <span role="columnheader">当月</span>
+              <span role="columnheader">更新日</span>
+            </div>
+            <div id="constants-body" class="constants-body" role="rowgroup"></div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="bottom-nav" aria-label="ショートカット">
+        <button class="nav-btn" data-target="dashboard">🏠</button>
+        <button class="nav-btn" data-target="scan">📷</button>
+        <button class="nav-btn" data-target="master">🗂️</button>
+        <button class="nav-btn" data-target="constants">📊</button>
+      </footer>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <?!= include('Scripts'); ?>
+  </body>
+</html>
