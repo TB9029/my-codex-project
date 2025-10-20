@@ -1,0 +1,1148 @@
+<script>
+  (() => {
+    const state = {
+      currentView: 'dashboard',
+      dashboard: null,
+      masters: [],
+      constants: [],
+      tags: [],
+      searchResults: [],
+      offlineQueue: loadQueue(),
+      lastScanTime: 0,
+      camera: {
+        reader: null,
+        stream: null,
+        deviceId: null
+      },
+      scan: {
+        stage: 'idle',
+        hintTimer: null,
+        overlayTimer: null,
+        resetTimer: null
+      }
+    };
+
+    const els = {
+      views: document.querySelectorAll('.view'),
+      navButtons: document.querySelectorAll('button.nav-btn[data-target]'),
+      searchInput: document.getElementById('global-search'),
+      searchClear: document.getElementById('search-clear'),
+      searchResults: document.getElementById('search-results'),
+      badgeExpired: document.getElementById('badge-expired'),
+      badgeLt1m: document.getElementById('badge-lt1m'),
+      badgeLt2m: document.getElementById('badge-lt2m'),
+      recentScans: document.getElementById('recent-scans'),
+      masterForm: document.getElementById('master-form'),
+      masterFormMessage: document.getElementById('master-form-message'),
+      masterList: document.getElementById('master-list'),
+      masterSearch: document.getElementById('master-search'),
+      masterTagFilter: document.getElementById('master-tag-filter'),
+      masterDialog: document.getElementById('master-dialog'),
+      masterEditForm: document.getElementById('master-edit-form'),
+      masterDelete: document.getElementById('master-delete'),
+      masterExport: document.getElementById('master-export'),
+      masterImport: document.getElementById('master-import'),
+      constantsBody: document.getElementById('constants-body'),
+      constantsImport: document.getElementById('constants-import'),
+      constantsExport: document.getElementById('constants-export'),
+      constantsDeficit: document.getElementById('constants-deficit'),
+      refreshButtons: document.querySelectorAll('[data-action="refresh-dashboard"]'),
+      queueList: document.getElementById('queue-list'),
+      flushQueue: document.getElementById('flush-queue'),
+      manualCode: document.getElementById('manual-code'),
+      manualSubmit: document.getElementById('manual-submit'),
+      resultCard: document.getElementById('scan-result'),
+      networkStatus: document.getElementById('network-status'),
+      toast: document.getElementById('toast'),
+      cameraPreview: document.getElementById('camera-preview'),
+      cameraOverlay: document.getElementById('camera-overlay'),
+      scanPlaceholder: document.getElementById('scan-placeholder'),
+      scanStatus: document.getElementById('scan-status-text'),
+      scanHint: document.getElementById('scan-hint'),
+      tabButtons: document.querySelectorAll('.tab-btn'),
+      tabPanels: document.querySelectorAll('.tab-panel')
+    };
+
+    function init() {
+      bindNav();
+      bindTabs();
+      bindSearch();
+      bindMasterForm();
+      bindMasterList();
+      bindMasterCsv();
+      bindConstantsCsv();
+      bindQueueControls();
+      bindManualInput();
+      bindNetworkEvents();
+      window.addEventListener('resize', syncOverlaySize);
+      if (els.cameraPreview) {
+        els.cameraPreview.addEventListener('loadedmetadata', syncOverlaySize);
+      }
+      renderQueue();
+      loadBootstrap();
+      switchView('dashboard');
+      setScanStage('idle');
+    }
+
+    function loadBootstrap() {
+      google.script.run
+        .withSuccessHandler(data => {
+          state.dashboard = data.dashboard;
+          state.masters = data.masters.items || [];
+          state.constants = data.constants.items || [];
+          state.tags = collectTags(state.masters);
+          renderDashboard();
+          renderMasterList();
+          renderConstants();
+          populateTagFilter();
+        })
+        .withFailureHandler(showError)
+        .getAppBootstrap();
+    }
+
+    function bindNav() {
+      els.navButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+          const target = btn.dataset.target;
+          if (target) {
+            switchView(target);
+          }
+        });
+      });
+    }
+
+    function bindTabs() {
+      els.tabButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+          const tab = btn.dataset.tab;
+          els.tabButtons.forEach(b => b.classList.toggle('active', b === btn));
+          els.tabPanels.forEach(panel => {
+            panel.classList.toggle('hidden', panel.dataset.tab !== tab);
+          });
+        });
+      });
+    }
+
+    function bindSearch() {
+      if (!els.searchInput) return;
+      els.searchInput.addEventListener('input', () => {
+        const term = els.searchInput.value.trim();
+        if (!term) {
+          els.searchResults.innerHTML = '';
+          return;
+        }
+        renderSearchResults(term);
+      });
+      els.searchClear.addEventListener('click', () => {
+        els.searchInput.value = '';
+        els.searchResults.innerHTML = '';
+        els.searchInput.focus();
+      });
+      els.refreshButtons.forEach(btn => {
+        btn.addEventListener('click', refreshDashboard);
+      });
+    }
+
+    function bindMasterForm() {
+      if (!els.masterForm) return;
+      els.masterForm.addEventListener('submit', evt => {
+        evt.preventDefault();
+        const formData = new FormData(els.masterForm);
+        const payload = Object.fromEntries(formData.entries());
+        payload.minimum = Number(payload.minimum || 0);
+        payload.qty = Number(payload.qty || 1);
+        payload.tags = (payload.tags || '')
+          .split(',')
+          .map(t => t.trim())
+          .filter(Boolean);
+        payload.active = true;
+        google.script.run
+          .withSuccessHandler(result => {
+            showToast('マスタを登録しました');
+            els.masterForm.reset();
+            refreshMasters();
+          })
+          .withFailureHandler(err => {
+            els.masterFormMessage.textContent = err.message || err;
+            showError(err);
+          })
+          .createMaster(payload);
+      });
+      els.masterForm.addEventListener('reset', () => {
+        els.masterFormMessage.textContent = '';
+      });
+    }
+
+    function bindMasterList() {
+      if (!els.masterList) return;
+      els.masterList.addEventListener('click', evt => {
+        const item = evt.target.closest('.master-item');
+        if (!item) return;
+        const id = item.dataset.id;
+        const master = state.masters.find(row => row.id === id);
+        if (!master) return;
+        openMasterDialog(master);
+      });
+      els.masterSearch.addEventListener('input', renderMasterList);
+      els.masterTagFilter.addEventListener('change', renderMasterList);
+      if (els.masterDialog) {
+        els.masterDialog.addEventListener('close', () => {
+          els.masterEditForm.reset();
+        });
+      }
+      els.masterEditForm.addEventListener('submit', evt => {
+        evt.preventDefault();
+        saveMasterFromDialog();
+      });
+      els.masterDelete.addEventListener('click', evt => {
+        evt.preventDefault();
+        const id = els.masterEditForm.elements['id'].value;
+        if (!id) return;
+        if (!confirm('本当に削除しますか？')) return;
+        google.script.run
+          .withSuccessHandler(() => {
+            showToast('マスタを削除しました');
+            els.masterDialog.close();
+            refreshMasters();
+          })
+          .withFailureHandler(showError)
+          .deleteMaster({ id });
+      });
+    }
+
+    function bindMasterCsv() {
+      els.masterExport.addEventListener('click', () => {
+        google.script.run
+          .withSuccessHandler(result => {
+            downloadCsv(result.csv, 'master.csv');
+            showToast('マスタをエクスポートしました');
+          })
+          .withFailureHandler(showError)
+          .exportMastersCsv();
+      });
+      els.masterImport.addEventListener('change', evt => {
+        const file = evt.target.files && evt.target.files[0];
+        if (!file) return;
+        readFileText(file)
+          .then(text => {
+            return new Promise((resolve, reject) => {
+              google.script.run
+                .withSuccessHandler(resolve)
+                .withFailureHandler(reject)
+                .importMastersCsv(text);
+            });
+          })
+          .then(() => {
+            showToast('マスタをインポートしました');
+            refreshMasters();
+          })
+          .catch(showError)
+          .finally(() => {
+            evt.target.value = '';
+          });
+      });
+    }
+
+    function bindConstantsCsv() {
+      els.constantsExport.addEventListener('click', () => {
+        google.script.run
+          .withSuccessHandler(result => {
+            downloadCsv(result.csv, 'constants.csv');
+            showToast('商品定数をエクスポートしました');
+          })
+          .withFailureHandler(showError)
+          .exportConstantsCsv();
+      });
+      els.constantsImport.addEventListener('change', evt => {
+        const file = evt.target.files && evt.target.files[0];
+        if (!file) return;
+        readFileText(file)
+          .then(text => {
+            return new Promise((resolve, reject) => {
+              google.script.run
+                .withSuccessHandler(resolve)
+                .withFailureHandler(reject)
+                .importConstantsCsv(text);
+            });
+          })
+          .then(() => {
+            showToast('商品定数をインポートしました');
+            refreshConstants();
+          })
+          .catch(showError)
+          .finally(() => {
+            evt.target.value = '';
+          });
+      });
+      els.constantsDeficit.addEventListener('click', () => {
+        google.script.run
+          .withSuccessHandler(result => {
+            downloadCsv(result.csv, 'deficit.csv');
+            showToast('不足リストを出力しました');
+          })
+          .withFailureHandler(showError)
+          .exportDeficitCsv();
+      });
+    }
+
+    function bindQueueControls() {
+      els.flushQueue.addEventListener('click', flushQueue);
+      window.addEventListener('online', handleOnline);
+      window.addEventListener('offline', handleOffline);
+      updateNetworkStatus(navigator.onLine);
+    }
+
+    function bindManualInput() {
+      els.manualSubmit.addEventListener('click', () => {
+        const raw = els.manualCode.value.trim();
+        if (!raw) return;
+        processScan(raw, {
+          processingMessage: '⌨️ 手入力データを送信中...',
+          processingOverlay: '⌨️ 手入力処理中…'
+        });
+        els.manualCode.value = '';
+      });
+      els.manualCode.addEventListener('keydown', evt => {
+        if (evt.key === 'Enter') {
+          evt.preventDefault();
+          els.manualSubmit.click();
+        }
+      });
+    }
+
+    function bindNetworkEvents() {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && state.currentView === 'scan') {
+          startCamera();
+        } else if (document.visibilityState !== 'visible') {
+          stopCamera();
+        }
+      });
+    }
+
+    function switchView(name) {
+      state.currentView = name;
+      els.views.forEach(view => {
+        view.classList.toggle('active', view.dataset.view === name);
+      });
+      document
+        .querySelectorAll('.nav-btn')
+        .forEach(btn => btn.classList.toggle('active', btn.dataset.target === name));
+      if (name === 'scan') {
+        startCamera();
+      } else {
+        stopCamera();
+      }
+    }
+
+    function refreshDashboard() {
+      google.script.run
+        .withSuccessHandler(data => {
+          state.dashboard = data;
+          renderDashboard();
+        })
+        .withFailureHandler(showError)
+        .getDashboardSnapshot();
+    }
+
+    function refreshMasters() {
+      google.script.run
+        .withSuccessHandler(result => {
+          state.masters = result.items || [];
+          state.tags = collectTags(state.masters);
+          renderMasterList();
+          populateTagFilter();
+        })
+        .withFailureHandler(showError)
+        .listMasters();
+    }
+
+    function refreshConstants() {
+      google.script.run
+        .withSuccessHandler(result => {
+          state.constants = result.items || [];
+          renderConstants();
+        })
+        .withFailureHandler(showError)
+        .listConstants();
+    }
+
+    function renderDashboard() {
+      if (!state.dashboard) return;
+      const near = state.dashboard.nearExpiry || {};
+      els.badgeExpired.textContent = near.expired || 0;
+      els.badgeLt1m.textContent = near.lt1m || 0;
+      els.badgeLt2m.textContent = near.lt2m || 0;
+      renderRecentScans(state.dashboard.latestScans || []);
+    }
+
+    function renderRecentScans(scans) {
+      els.recentScans.innerHTML = '';
+      if (!scans.length) {
+        els.recentScans.innerHTML = '<li class="scan-item">履歴がありません</li>';
+        return;
+      }
+      const fragment = document.createDocumentFragment();
+      scans.forEach(entry => {
+        const li = document.createElement('li');
+        li.className = 'scan-item';
+        li.innerHTML = `
+          <header>
+            <span>${escapeHtml(entry.gtin || '---')}</span>
+            <span>${escapeHtml(entry.timestamp || '')}</span>
+          </header>
+          <div>期限: ${entry.expiry || '-'} / 判定: <span class="status-tag">${entry.status || '-'}</span></div>
+          <div>メモ: ${escapeHtml(entry.notes || '')}</div>
+        `;
+        fragment.appendChild(li);
+      });
+      els.recentScans.appendChild(fragment);
+    }
+
+    function renderSearchResults(term) {
+      if (!state.dashboard || !state.dashboard.searchIndex) return;
+      const normalized = term.toLowerCase();
+      const hits = state.dashboard.searchIndex.filter(item => {
+        const haystack = [item.name, item.tags.join(','), item.gs1.join(',')]
+          .join(' ')
+          .toLowerCase();
+        return haystack.includes(normalized);
+      });
+      els.searchResults.innerHTML = '';
+      if (!hits.length) {
+        els.searchResults.innerHTML = '<li class="search-item">該当がありません</li>';
+        return;
+      }
+      const fragment = document.createDocumentFragment();
+      hits.forEach(hit => {
+        const li = document.createElement('li');
+        li.className = 'search-item';
+        li.innerHTML = `
+          <header>${escapeHtml(hit.name)}</header>
+          <div>GS1: ${hit.gs1.map(escapeHtml).join(', ')}</div>
+          <div>タグ: ${hit.tags.map(escapeHtml).join(', ') || '-'}</div>
+        `;
+        fragment.appendChild(li);
+      });
+      els.searchResults.appendChild(fragment);
+    }
+
+    function collectTags(masters) {
+      const set = new Set();
+      masters.forEach(item => {
+        (item.tags || []).forEach(tag => set.add(tag));
+      });
+      return Array.from(set).sort();
+    }
+
+    function populateTagFilter() {
+      const select = els.masterTagFilter;
+      const current = select.value;
+      select.innerHTML = '<option value="">タグで絞り込み</option>';
+      state.tags.forEach(tag => {
+        const opt = document.createElement('option');
+        opt.value = tag;
+        opt.textContent = tag;
+        select.appendChild(opt);
+      });
+      if (current) {
+        select.value = current;
+      }
+    }
+
+    function renderMasterList() {
+      const keyword = (els.masterSearch.value || '').toLowerCase();
+      const tag = els.masterTagFilter.value;
+      const list = state.masters.filter(item => {
+        if (tag && !(item.tags || []).includes(tag)) return false;
+        if (!keyword) return true;
+        const text = [
+          item.name,
+          item.gs1,
+          item.alt1,
+          item.alt2,
+          (item.tags || []).join(',')
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        return text.includes(keyword);
+      });
+      els.masterList.innerHTML = '';
+      if (!list.length) {
+        els.masterList.innerHTML = '<div class="master-item">該当するマスタがありません</div>';
+        return;
+      }
+      const fragment = document.createDocumentFragment();
+      list.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'master-item';
+        div.dataset.id = item.id;
+        div.innerHTML = `
+          <header>${escapeHtml(item.name)} ${item.active ? '' : '<span class="tag">無効</span>'}</header>
+          <div>GS1: ${escapeHtml(item.gs1)}</div>
+          <div>予備: ${escapeHtml(item.alt1 || '-')} / ${escapeHtml(item.alt2 || '-')}</div>
+          <div>定数: ${item.minimum} / 単位: ${escapeHtml(item.unit)} / QTY: ${item.qty}</div>
+          <div class="tags">${(item.tags || []).map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join('')}</div>
+        `;
+        fragment.appendChild(div);
+      });
+      els.masterList.appendChild(fragment);
+    }
+
+    function openMasterDialog(master) {
+      const form = els.masterEditForm;
+      form.elements['id'].value = master.id;
+      form.elements['name'].value = master.name;
+      form.elements['gs1'].value = master.gs1;
+      form.elements['alt1'].value = master.alt1 || '';
+      form.elements['alt2'].value = master.alt2 || '';
+      form.elements['minimum'].value = master.minimum;
+      form.elements['unit'].value = master.unit;
+      form.elements['qty'].value = master.qty;
+      form.elements['tags'].value = (master.tags || []).join(', ');
+      form.elements['active'].checked = !!master.active;
+      if (typeof els.masterDialog.showModal === 'function') {
+        els.masterDialog.showModal();
+      }
+    }
+
+    function saveMasterFromDialog() {
+      const form = els.masterEditForm;
+      const payload = {
+        id: form.elements['id'].value,
+        name: form.elements['name'].value,
+        gs1: form.elements['gs1'].value,
+        alt1: form.elements['alt1'].value,
+        alt2: form.elements['alt2'].value,
+        minimum: Number(form.elements['minimum'].value || 0),
+        unit: form.elements['unit'].value,
+        qty: Number(form.elements['qty'].value || 1),
+        tags: form.elements['tags'].value
+          .split(',')
+          .map(t => t.trim())
+          .filter(Boolean),
+        active: form.elements['active'].checked
+      };
+      google.script.run
+        .withSuccessHandler(() => {
+          showToast('マスタを更新しました');
+          els.masterDialog.close();
+          refreshMasters();
+        })
+        .withFailureHandler(showError)
+        .updateMaster(payload);
+    }
+
+    function renderConstants() {
+      els.constantsBody.innerHTML = '';
+      if (!state.constants.length) {
+        els.constantsBody.innerHTML = '<div class="constants-row">データがありません</div>';
+        return;
+      }
+      const fragment = document.createDocumentFragment();
+      state.constants.forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'constants-row';
+        row.dataset.color = item.color || 'neutral';
+        row.innerHTML = `
+          <span>${escapeHtml(item.name)}${item.active ? '' : '（無効）'}</span>
+          <span class="baseline">${item.baseline}</span>
+          <span>${item.currentValue} (${item.currentMonth})</span>
+          <span>${escapeHtml(item.updatedAt || '')}</span>
+        `;
+        const editButton = document.createElement('button');
+        editButton.className = 'secondary';
+        editButton.textContent = '編集';
+        editButton.addEventListener('click', () => openConstantEditor(item));
+        row.appendChild(editButton);
+        fragment.appendChild(row);
+      });
+      els.constantsBody.appendChild(fragment);
+    }
+
+    function openConstantEditor(item) {
+      const month = item.currentMonth;
+      const value = prompt(`${item.name} の ${month} 在庫数`, item.currentValue);
+      if (value === null) return;
+      const num = Number(value);
+      if (Number.isNaN(num)) {
+        showToast('数値を入力してください');
+        return;
+      }
+      google.script.run
+        .withSuccessHandler(() => {
+          showToast('商品定数を更新しました');
+          refreshConstants();
+        })
+        .withFailureHandler(showError)
+        .updateConstant({ id: item.id, month, value: num });
+    }
+
+    function setScanStage(stage, options = {}) {
+      if (state.scan.resetTimer) {
+        clearTimeout(state.scan.resetTimer);
+        state.scan.resetTimer = null;
+      }
+      const defaults = {
+        idle: { message: 'カメラを起動するとスキャンできます', tone: 'muted' },
+        initializing: { message: 'カメラ初期化中…', tone: 'info' },
+        ready: {
+          message: '📷 カメラ準備完了。バーコードを枠内に収めてください',
+          tone: 'info'
+        },
+        active: { message: '🔍 読み取り中…', tone: 'info' },
+        processing: { message: '☁️ 読み取りデータを処理中…', tone: 'info' },
+        success: { message: '✅ 読み取り完了', tone: 'success' },
+        queued: {
+          message: '📦 オフラインのためキューに保存しました',
+          tone: 'warning'
+        },
+        error: {
+          message: '⚠️ 読み取りに失敗しました。位置や明るさを調整してください',
+          tone: 'danger'
+        }
+      };
+      const preset = defaults[stage] || {};
+      const message = options.message || preset.message || '';
+      const tone = options.tone || preset.tone || 'info';
+      state.scan.stage = stage;
+      updateScanStatus(message, tone);
+      if (stage === 'active') {
+        clearOverlay();
+        scheduleScanHint();
+      } else if (stage === 'ready') {
+        clearOverlay();
+        clearScanHint();
+      } else if (stage === 'idle' || stage === 'initializing') {
+        clearScanHint();
+        clearOverlay();
+      } else {
+        clearScanHint();
+      }
+    }
+
+    function updateScanStatus(message, tone) {
+      if (!els.scanStatus) return;
+      els.scanStatus.textContent = message;
+      els.scanStatus.dataset.tone = tone || 'info';
+    }
+
+    function scheduleScanHint(delay = 8000) {
+      clearScanHintTimer();
+      if (state.scan.stage !== 'active') return;
+      state.scan.hintTimer = setTimeout(() => {
+        showScanHint('読み取りづらい場合は距離や角度、周囲の明るさを調整してください。必要に応じて手入力もご利用いただけます。');
+      }, delay);
+    }
+
+    function showScanHint(text) {
+      if (!els.scanHint) return;
+      els.scanHint.textContent = text;
+      els.scanHint.classList.add('visible');
+    }
+
+    function clearScanHint() {
+      clearScanHintTimer();
+      if (!els.scanHint) return;
+      els.scanHint.textContent = '';
+      els.scanHint.classList.remove('visible');
+    }
+
+    function clearScanHintTimer() {
+      if (state.scan.hintTimer) {
+        clearTimeout(state.scan.hintTimer);
+        state.scan.hintTimer = null;
+      }
+    }
+
+    function scheduleReturnToActive(delay = 2000) {
+      if (state.scan.resetTimer) {
+        clearTimeout(state.scan.resetTimer);
+      }
+      state.scan.resetTimer = setTimeout(() => {
+        state.scan.resetTimer = null;
+        if (state.currentView === 'scan' && state.camera.stream) {
+          setScanStage('active');
+        } else {
+          setScanStage('idle');
+        }
+      }, delay);
+    }
+
+    function clearScanTimers() {
+      clearScanHintTimer();
+      if (state.scan.overlayTimer) {
+        clearTimeout(state.scan.overlayTimer);
+        state.scan.overlayTimer = null;
+      }
+      if (state.scan.resetTimer) {
+        clearTimeout(state.scan.resetTimer);
+        state.scan.resetTimer = null;
+      }
+    }
+
+    function syncOverlaySize() {
+      if (!els.cameraOverlay || !els.cameraPreview) return;
+      const video = els.cameraPreview;
+      const canvas = els.cameraOverlay;
+      const width = video.videoWidth || video.clientWidth;
+      const height = video.videoHeight || video.clientHeight;
+      if (!width || !height) return;
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+    }
+
+    function drawOverlayMessage(title, tone = 'info', subtitle = '') {
+      if (!els.cameraOverlay) return;
+      const canvas = els.cameraOverlay;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      syncOverlaySize();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const toneColors = {
+        info: 'rgba(44, 123, 229, 0.75)',
+        success: 'rgba(43, 191, 106, 0.78)',
+        warning: 'rgba(255, 180, 0, 0.78)',
+        caution: 'rgba(249, 214, 92, 0.78)',
+        danger: 'rgba(255, 77, 109, 0.78)',
+        muted: 'rgba(12, 16, 24, 0.65)'
+      };
+      const color = toneColors[tone] || toneColors.info;
+      const titleText = title && title.length > 28 ? `${title.slice(0, 28)}…` : title;
+      const subtitleText = subtitle && subtitle.length > 32 ? `${subtitle.slice(0, 32)}…` : subtitle;
+      const boxHeight = subtitleText ? canvas.height * 0.32 : canvas.height * 0.26;
+      const top = (canvas.height - boxHeight) / 2;
+      ctx.fillStyle = color;
+      ctx.fillRect(0, top, canvas.width, boxHeight);
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      const baseFont = Math.max(24, canvas.width * 0.06);
+      ctx.font = `700 ${baseFont}px "Noto Sans JP", sans-serif`;
+      ctx.fillText(titleText, canvas.width / 2, top + boxHeight / 2 - (subtitleText ? baseFont * 0.2 : 0));
+      if (subtitleText) {
+        const subFont = Math.max(18, canvas.width * 0.04);
+        ctx.font = `500 ${subFont}px "Noto Sans JP", sans-serif`;
+        ctx.fillText(subtitleText, canvas.width / 2, top + boxHeight / 2 + subFont * 1.1);
+      }
+      if (state.scan.overlayTimer) {
+        clearTimeout(state.scan.overlayTimer);
+      }
+      state.scan.overlayTimer = setTimeout(() => {
+        clearOverlay();
+      }, 1800);
+    }
+
+    function clearOverlay() {
+      if (!els.cameraOverlay) return;
+      const ctx = els.cameraOverlay.getContext('2d');
+      if (!ctx) return;
+      ctx.clearRect(0, 0, els.cameraOverlay.width, els.cameraOverlay.height);
+    }
+
+    function ensureActiveScanning() {
+      if (state.scan.stage === 'ready' || state.scan.stage === 'initializing') {
+        setScanStage('active');
+      }
+    }
+
+    function startCamera() {
+      if (state.camera.stream) {
+        return;
+      }
+      if (!navigator.mediaDevices || !window.ZXing) {
+        els.scanPlaceholder.textContent = 'カメラを利用できません';
+        els.scanPlaceholder.classList.remove('hidden');
+        setScanStage('error', {
+          message: 'カメラ機能が利用できません。対応端末または対応ブラウザで開いてください。',
+          tone: 'danger'
+        });
+        return;
+      }
+      if (!state.camera.reader) {
+        state.camera.reader = new ZXing.BrowserMultiFormatReader();
+      }
+      setScanStage('initializing');
+      stopCamera(true, true);
+      els.scanPlaceholder.textContent = 'カメラ初期化中…';
+      els.scanPlaceholder.classList.remove('hidden');
+      const constraints = {
+        video: {
+          facingMode: { ideal: 'environment' }
+        },
+        audio: false
+      };
+      navigator.mediaDevices
+        .getUserMedia(constraints)
+        .then(stream => {
+          state.camera.stream = stream;
+          els.cameraPreview.srcObject = stream;
+          return waitForVideo(els.cameraPreview);
+        })
+        .then(() => {
+          els.scanPlaceholder.classList.add('hidden');
+          syncOverlaySize();
+          setScanStage('ready');
+          return state.camera.reader.decodeFromVideoElement(
+            els.cameraPreview,
+            (result, err) => {
+              if (!state.camera.stream) {
+                return;
+              }
+              if (result) {
+                handleCameraResult(result.getText());
+              } else if (err instanceof ZXing.NotFoundException) {
+                ensureActiveScanning();
+              } else if (err && !(err instanceof ZXing.NotFoundException)) {
+                console.error(err);
+              }
+            },
+            undefined,
+            200
+          );
+        })
+        .catch(error => {
+          stopCamera(false);
+          if (error && error.name === 'NotAllowedError') {
+            els.scanPlaceholder.textContent = 'カメラへのアクセスが許可されませんでした。ブラウザの設定をご確認ください。';
+          } else if (error && error.name === 'NotFoundError') {
+            els.scanPlaceholder.textContent = 'カメラデバイスが見つかりません';
+          } else {
+            els.scanPlaceholder.textContent = 'カメラ初期化に失敗しました';
+          }
+          setScanStage('error', {
+            message: 'カメラの初期化に失敗しました。権限や他のアプリの使用状況をご確認ください。',
+            tone: 'danger'
+          });
+          showError(error);
+        });
+    }
+
+    function waitForVideo(video) {
+      return new Promise(resolve => {
+        const handleLoaded = () => {
+          video.removeEventListener('loadeddata', handleLoaded);
+          const playPromise = video.play();
+          if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch(() => {});
+          }
+          resolve();
+        };
+        if (video.readyState >= 2) {
+          handleLoaded();
+        } else {
+          video.addEventListener('loadeddata', handleLoaded, { once: true });
+        }
+      });
+    }
+
+    function stopCamera(keepPlaceholder = false, skipStageUpdate = false) {
+      if (state.camera.reader) {
+        try {
+          state.camera.reader.reset();
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      if (state.camera.stream) {
+        state.camera.stream.getTracks().forEach(track => {
+          try {
+            track.stop();
+          } catch (err) {
+            console.error(err);
+          }
+        });
+        state.camera.stream = null;
+      }
+      if (els.cameraPreview) {
+        els.cameraPreview.srcObject = null;
+      }
+      clearScanTimers();
+      clearOverlay();
+      if (!keepPlaceholder && els.scanPlaceholder) {
+        els.scanPlaceholder.classList.remove('hidden');
+        els.scanPlaceholder.textContent = 'カメラは停止中です';
+      }
+      if (!skipStageUpdate) {
+        setScanStage('idle');
+      }
+    }
+
+    function handleCameraResult(text) {
+      const now = Date.now();
+      if (now - state.lastScanTime < 300) {
+        return;
+      }
+      state.lastScanTime = now;
+      processScan(text);
+    }
+
+    function processScan(raw, options = {}) {
+      const processingMessage = options.processingMessage || '☁️ 読み取りデータを処理中…';
+      const processingTone = options.processingTone || 'info';
+      const overlayText = options.processingOverlay || '📤 読み取り中…';
+      setScanStage('processing', { message: processingMessage, tone: processingTone });
+      drawOverlayMessage(overlayText, processingTone);
+      if (!navigator.onLine) {
+        queueScan(raw);
+        showToast('オフラインのためキューに保存しました');
+        renderQueue();
+        setScanStage('queued', {
+          message: '📦 オフラインのためキューに保存しました（接続復帰で自動送信）',
+          tone: 'warning'
+        });
+        drawOverlayMessage('📦 オフライン保存', 'warning', 'オンライン復帰後に送信します');
+        scheduleReturnToActive(2600);
+        return;
+      }
+      google.script.run
+        .withSuccessHandler(result => {
+          displayScanResult(result);
+          presentScanOutcome(result);
+          playFeedback(result.status);
+          refreshDashboard();
+          flushQueue();
+        })
+        .withFailureHandler(err => {
+          showError(err);
+          if (!navigator.onLine) {
+            queueScan(raw);
+            renderQueue();
+            setScanStage('queued', {
+              message: '📦 オフラインのためキューに保存しました（接続復帰で自動送信）',
+              tone: 'warning'
+            });
+            drawOverlayMessage('📦 オフライン保存', 'warning', 'オンライン復帰後に送信します');
+            scheduleReturnToActive(2600);
+          } else {
+            setScanStage('error', {
+              message: '⚠️ 読み取り結果の送信に失敗しました。再度お試しください。',
+              tone: 'danger'
+            });
+            drawOverlayMessage('⚠️ 送信失敗', 'danger');
+            scheduleReturnToActive(2600);
+          }
+        })
+        .recordScan({ raw });
+    }
+
+    function displayScanResult(result) {
+      const fields = els.resultCard.querySelectorAll('[data-field]');
+      const map = {
+        name: result.master ? result.master.name : '未登録',
+        expiry: result.parsed && result.parsed.expiryIso ? result.parsed.expiryIso : '-'
+      };
+      if (result.status) {
+        map.status = `${result.status.icon || result.status} ${result.status.label || ''}`;
+      } else {
+        map.status = '-';
+      }
+      map.lot = result.parsed && result.parsed.lot ? result.parsed.lot : '-';
+      map.serial = result.parsed && result.parsed.serial ? result.parsed.serial : '-';
+      fields.forEach(field => {
+        const key = field.dataset.field;
+        field.textContent = map[key] || '-';
+      });
+      els.resultCard.dataset.status = result.status ? result.status.code : '';
+    }
+
+    function presentScanOutcome(result) {
+      const status = result.status || {};
+      const toneMap = {
+        expired: 'danger',
+        lt1m: 'warning',
+        lt2m: 'caution',
+        ok: 'success',
+        'no-data': 'info'
+      };
+      const tone = toneMap[status.code] || 'info';
+      const icon = status.icon || '✅';
+      const label = status.label || '読み取り完了';
+      const product = result.master ? result.master.name : 'マスタ未登録の商品';
+      const overlayProduct = product && product.length > 24 ? `${product.slice(0, 24)}…` : product;
+      setScanStage('success', {
+        message: `${icon} ${label} - 次のバーコードを読み取ってください`,
+        tone: tone
+      });
+      drawOverlayMessage(`${icon} ${label}`, tone, overlayProduct);
+      scheduleReturnToActive(2200);
+    }
+
+    function playFeedback(status) {
+      try {
+        if ('vibrate' in navigator) {
+          navigator.vibrate([60, 40, 60]);
+        }
+      } catch (e) {
+        console.debug(e);
+      }
+      if (!window.AudioContext) return;
+      try {
+        const ctx = new AudioContext();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const freqMap = {
+          expired: 220,
+          lt1m: 320,
+          lt2m: 420,
+          ok: 520,
+          'no-data': 380
+        };
+        const freq = status && freqMap[status.code] ? freqMap[status.code] : 500;
+        osc.frequency.value = freq;
+        osc.type = 'sine';
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.3);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.32);
+      } catch (err) {
+        console.debug(err);
+      }
+    }
+
+    function queueScan(raw) {
+      state.offlineQueue.push({ raw, timestamp: new Date().toISOString() });
+      saveQueue();
+    }
+
+    function flushQueue() {
+      if (!state.offlineQueue.length || !navigator.onLine) {
+        return;
+      }
+      const queue = [...state.offlineQueue];
+      const next = () => {
+        if (!queue.length) {
+          state.offlineQueue = [];
+          saveQueue();
+          renderQueue();
+          showToast('キューを送信しました');
+          refreshDashboard();
+          return;
+        }
+        const item = queue.shift();
+        google.script.run
+          .withSuccessHandler(() => {
+            state.offlineQueue.shift();
+            saveQueue();
+            renderQueue();
+            next();
+          })
+          .withFailureHandler(err => {
+            showError(err);
+            renderQueue();
+          })
+          .recordScan({ raw: item.raw });
+      };
+      next();
+    }
+
+    function renderQueue() {
+      els.queueList.innerHTML = '';
+      if (!state.offlineQueue.length) {
+        els.queueList.innerHTML = '<li class="queue-item">キューは空です</li>';
+        return;
+      }
+      const fragment = document.createDocumentFragment();
+      state.offlineQueue.forEach(item => {
+        const li = document.createElement('li');
+        li.className = 'queue-item';
+        li.textContent = `${item.timestamp} : ${item.raw}`;
+        fragment.appendChild(li);
+      });
+      els.queueList.appendChild(fragment);
+    }
+
+    function handleOnline() {
+      updateNetworkStatus(true);
+      flushQueue();
+    }
+
+    function handleOffline() {
+      updateNetworkStatus(false);
+      showToast('オフラインモードになりました');
+    }
+
+    function updateNetworkStatus(isOnline) {
+      if (!els.networkStatus) return;
+      if (isOnline) {
+        els.networkStatus.textContent = '🔌 オンライン';
+        els.networkStatus.classList.remove('offline');
+      } else {
+        els.networkStatus.textContent = '⚠️ オフライン';
+        els.networkStatus.classList.add('offline');
+      }
+    }
+
+    function readFileText(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsText(file, 'UTF-8');
+      });
+    }
+
+    function downloadCsv(text, filename) {
+      const blob = new Blob([text], { type: 'text/csv;charset=UTF-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
+
+    function showToast(message) {
+      if (!els.toast) return;
+      els.toast.textContent = message;
+      els.toast.classList.add('active');
+      setTimeout(() => {
+        els.toast.classList.remove('active');
+      }, 2400);
+    }
+
+    function showError(error) {
+      const message = (error && error.message) || error || 'エラーが発生しました';
+      console.error(message);
+      showToast(message);
+    }
+
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function loadQueue() {
+      try {
+        const text = localStorage.getItem('gs1-offline-queue');
+        if (!text) return [];
+        return JSON.parse(text);
+      } catch (e) {
+        console.error(e);
+        return [];
+      }
+    }
+
+    function saveQueue() {
+      try {
+        localStorage.setItem('gs1-offline-queue', JSON.stringify(state.offlineQueue));
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    window.addEventListener('load', init);
+  })();
+</script>
