@@ -564,48 +564,106 @@
     }
 
     function startCamera() {
+      if (state.camera.stream) {
+        return;
+      }
       if (!navigator.mediaDevices || !window.ZXing) {
         els.scanPlaceholder.textContent = 'カメラを利用できません';
+        els.scanPlaceholder.classList.remove('hidden');
         return;
       }
       if (!state.camera.reader) {
         state.camera.reader = new ZXing.BrowserMultiFormatReader();
       }
-      ZXing.BrowserMultiFormatReader.listVideoInputDevices()
-        .then(devices => {
-          if (!devices.length) {
-            els.scanPlaceholder.textContent = 'カメラデバイスが見つかりません';
-            return;
-          }
-          const preferred = devices.find(device => /back|rear/i.test(device.label));
-          state.camera.deviceId = preferred ? preferred.deviceId : devices[0].deviceId;
-          return state.camera.reader.decodeFromVideoDevice(
-            state.camera.deviceId,
-            els.cameraPreview,
-            (result, err) => {
-              if (result) {
-                const text = result.getText();
-                handleCameraResult(text);
-              }
-            }
-          );
+      stopCamera(true);
+      els.scanPlaceholder.textContent = 'カメラ初期化中...';
+      els.scanPlaceholder.classList.remove('hidden');
+      const constraints = {
+        video: {
+          facingMode: { ideal: 'environment' }
+        },
+        audio: false
+      };
+      navigator.mediaDevices
+        .getUserMedia(constraints)
+        .then(stream => {
+          state.camera.stream = stream;
+          els.cameraPreview.srcObject = stream;
+          return waitForVideo(els.cameraPreview);
         })
         .then(() => {
           els.scanPlaceholder.classList.add('hidden');
+          return state.camera.reader.decodeFromVideoElement(
+            els.cameraPreview,
+            (result, err) => {
+              if (!state.camera.stream) {
+                return;
+              }
+              if (result) {
+                handleCameraResult(result.getText());
+              } else if (err && !(err instanceof ZXing.NotFoundException)) {
+                console.error(err);
+              }
+            },
+            undefined,
+            200
+          );
         })
         .catch(error => {
-          els.scanPlaceholder.textContent = 'カメラ初期化に失敗しました';
+          stopCamera();
+          if (error && error.name === 'NotAllowedError') {
+            els.scanPlaceholder.textContent = 'カメラへのアクセスが許可されませんでした。ブラウザの設定をご確認ください。';
+          } else if (error && error.name === 'NotFoundError') {
+            els.scanPlaceholder.textContent = 'カメラデバイスが見つかりません';
+          } else {
+            els.scanPlaceholder.textContent = 'カメラ初期化に失敗しました';
+          }
           showError(error);
         });
     }
 
-    function stopCamera() {
+    function waitForVideo(video) {
+      return new Promise(resolve => {
+        const handleLoaded = () => {
+          video.removeEventListener('loadeddata', handleLoaded);
+          const playPromise = video.play();
+          if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch(() => {});
+          }
+          resolve();
+        };
+        if (video.readyState >= 2) {
+          handleLoaded();
+        } else {
+          video.addEventListener('loadeddata', handleLoaded, { once: true });
+        }
+      });
+    }
+
+    function stopCamera(keepPlaceholder = false) {
       if (state.camera.reader) {
         try {
           state.camera.reader.reset();
         } catch (e) {
           console.error(e);
         }
+      }
+      if (state.camera.stream) {
+        state.camera.stream.getTracks().forEach(track => {
+          try {
+            track.stop();
+          } catch (err) {
+            console.error(err);
+          }
+        });
+        state.camera.stream = null;
+      }
+      if (els.cameraPreview) {
+        els.cameraPreview.srcObject = null;
+      }
+      if (!keepPlaceholder && els.scanPlaceholder) {
+        els.scanPlaceholder.classList.remove('hidden');
+        els.scanPlaceholder.textContent = 'カメラ初期化中...';
       }
     }
 
