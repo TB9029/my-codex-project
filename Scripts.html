@@ -909,6 +909,40 @@
       }
     }
 
+    function handleDecodeLoop(result, err) {
+      if (!state.camera.stream) {
+        return;
+      }
+      if (result) {
+        handleCameraResult(result.getText());
+      } else if (err instanceof ZXing.NotFoundException) {
+        ensureActiveScanning();
+      } else if (err && !(err instanceof ZXing.NotFoundException)) {
+        console.error(err);
+      }
+    }
+
+    function restartCameraDecoding() {
+      if (!state.camera.reader || !state.camera.stream) {
+        return;
+      }
+      try {
+        state.camera.reader.reset();
+      } catch (err) {
+        console.error(err);
+      }
+      try {
+        state.camera.reader.decodeFromVideoElement(
+          els.cameraPreview,
+          handleDecodeLoop,
+          state.camera.hints,
+          200
+        );
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
     function updateCameraHints(options = {}) {
       if (!window.ZXing || !ZXing.DecodeHintType || !ZXing.BarcodeFormat) {
         state.camera.hints = null;
@@ -951,6 +985,15 @@
       }
       if (options.restart) {
         restartFrameProcessing();
+      if (state.camera.reader && typeof state.camera.reader.setHints === 'function') {
+        try {
+          state.camera.reader.setHints(hints);
+        } catch (err) {
+          console.error(err);
+        }
+      }
+      if (options.restart) {
+        restartCameraDecoding();
       }
     }
 
@@ -971,6 +1014,15 @@
       stopCamera(true, true);
       updateCameraHints();
       prepareScanCanvases();
+      if (!state.camera.reader) {
+        state.camera.reader = new ZXing.BrowserMultiFormatReader(state.camera.hints || undefined);
+      } else if (state.camera.hints && typeof state.camera.reader.setHints === 'function') {
+        try {
+          state.camera.reader.setHints(state.camera.hints);
+        } catch (err) {
+          console.error(err);
+        }
+      }
       els.scanPlaceholder.textContent = 'カメラ初期化中…';
       els.scanPlaceholder.classList.remove('hidden');
       const supported = navigator.mediaDevices.getSupportedConstraints
@@ -1003,6 +1055,12 @@
           syncOverlaySize();
           setScanStage('ready');
           beginFrameProcessing();
+          return state.camera.reader.decodeFromVideoElement(
+            els.cameraPreview,
+            handleDecodeLoop,
+            state.camera.hints,
+            200
+          );
         })
         .catch(error => {
           stopCamera(false);
