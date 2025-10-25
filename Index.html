@@ -65,8 +65,21 @@
 
         <section id="view-scan" class="view" data-view="scan" aria-label="在庫チェック">
           <div class="scan-top">
-            <h2>GS1 スキャン</h2>
-            <div class="status-indicator" id="network-status">🔌 オンライン</div>
+            <div class="scan-top-headings">
+              <h2>GS1 スキャン</h2>
+              <p id="gs1-mode-label" class="scan-mode-label">GS1-128 / GS1 DataMatrix 優先モード</p>
+            </div>
+            <div class="scan-top-actions">
+              <button
+                id="toggle-gs1-mode"
+                class="secondary scan-mode-btn"
+                type="button"
+                aria-pressed="true"
+              >
+                GS1リーダー ON
+              </button>
+              <div class="status-indicator" id="network-status">🔌 オンライン</div>
+            </div>
           </div>
           <div class="camera-container">
             <video id="camera-preview" autoplay muted playsinline></video>
