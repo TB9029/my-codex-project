@@ -12,7 +12,9 @@
       camera: {
         reader: null,
         stream: null,
-        deviceId: null
+        deviceId: null,
+        gs1Mode: true,
+        hints: null
       },
       scan: {
         stage: 'idle',
@@ -59,6 +61,8 @@
       scanPlaceholder: document.getElementById('scan-placeholder'),
       scanStatus: document.getElementById('scan-status-text'),
       scanHint: document.getElementById('scan-hint'),
+      gs1ModeToggle: document.getElementById('toggle-gs1-mode'),
+      gs1ModeLabel: document.getElementById('gs1-mode-label'),
       tabButtons: document.querySelectorAll('.tab-btn'),
       tabPanels: document.querySelectorAll('.tab-panel')
     };
@@ -73,6 +77,7 @@
       bindConstantsCsv();
       bindQueueControls();
       bindManualInput();
+      bindScanControls();
       bindNetworkEvents();
       window.addEventListener('resize', syncOverlaySize);
       if (els.cameraPreview) {
@@ -308,6 +313,52 @@
           els.manualSubmit.click();
         }
       });
+    }
+
+    function bindScanControls() {
+      updateCameraHints();
+      updateGs1ModeUI();
+      if (els.gs1ModeToggle) {
+        els.gs1ModeToggle.addEventListener('click', toggleGs1Mode);
+      }
+    }
+
+    function toggleGs1Mode() {
+      state.camera.gs1Mode = !state.camera.gs1Mode;
+      updateCameraHints({ restart: true });
+      updateGs1ModeUI();
+      const toastMessage = state.camera.gs1Mode
+        ? 'GS1リーダーモードを有効にしました（GS1-128/GS1 DataMatrix）'
+        : '汎用バーコードモードに切り替えました';
+      showToast(toastMessage);
+      if (state.currentView === 'scan') {
+        drawOverlayMessage(
+          state.camera.gs1Mode ? 'GS1リーダー ON' : 'GS1リーダー OFF',
+          'info',
+          state.camera.gs1Mode
+            ? 'GS1-128 / GS1 DataMatrix を優先して読み取ります'
+            : 'JAN・QR など汎用バーコードを併用します'
+        );
+        clearScanHint();
+        showScanHint(
+          state.camera.gs1Mode
+            ? '枠内で水平に保持し、GS1 の先頭が左側に来るよう調整してください。'
+            : 'GS1 が読み取りづらい場合は再度 ON に切り替えてください。'
+        );
+        scheduleReturnToActive(2000);
+      }
+    }
+
+    function updateGs1ModeUI() {
+      if (els.gs1ModeToggle) {
+        els.gs1ModeToggle.textContent = state.camera.gs1Mode ? 'GS1リーダー ON' : 'GS1リーダー OFF';
+        els.gs1ModeToggle.setAttribute('aria-pressed', state.camera.gs1Mode ? 'true' : 'false');
+      }
+      if (els.gs1ModeLabel) {
+        els.gs1ModeLabel.textContent = state.camera.gs1Mode
+          ? 'GS1-128 / GS1 DataMatrix 優先モード'
+          : '汎用バーコードモード';
+      }
     }
 
     function bindNetworkEvents() {
@@ -748,6 +799,78 @@
       }
     }
 
+    function handleDecodeLoop(result, err) {
+      if (!state.camera.stream) {
+        return;
+      }
+      if (result) {
+        handleCameraResult(result.getText());
+      } else if (err instanceof ZXing.NotFoundException) {
+        ensureActiveScanning();
+      } else if (err && !(err instanceof ZXing.NotFoundException)) {
+        console.error(err);
+      }
+    }
+
+    function restartCameraDecoding() {
+      if (!state.camera.reader || !state.camera.stream) {
+        return;
+      }
+      try {
+        state.camera.reader.reset();
+      } catch (err) {
+        console.error(err);
+      }
+      try {
+        state.camera.reader.decodeFromVideoElement(
+          els.cameraPreview,
+          handleDecodeLoop,
+          state.camera.hints,
+          200
+        );
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    function updateCameraHints(options = {}) {
+      if (!window.ZXing || !ZXing.DecodeHintType || !ZXing.BarcodeFormat) {
+        state.camera.hints = null;
+        return;
+      }
+      const formats = new Set([
+        ZXing.BarcodeFormat.CODE_128,
+        ZXing.BarcodeFormat.DATA_MATRIX,
+        ZXing.BarcodeFormat.QR_CODE
+      ].filter(Boolean));
+      const extraFormats = state.camera.gs1Mode
+        ? ['RSS_EXPANDED', 'RSS_14', 'RSS_LIMITED']
+        : ['EAN_13', 'EAN_8', 'UPC_A', 'UPC_E', 'CODE_39', 'ITF'];
+      extraFormats.forEach(name => {
+        const fmt = ZXing.BarcodeFormat[name];
+        if (fmt) {
+          formats.add(fmt);
+        }
+      });
+      const hints = new Map();
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, Array.from(formats));
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      if (state.camera.gs1Mode) {
+        hints.set(ZXing.DecodeHintType.ASSUME_GS1, true);
+      }
+      state.camera.hints = hints;
+      if (state.camera.reader && typeof state.camera.reader.setHints === 'function') {
+        try {
+          state.camera.reader.setHints(hints);
+        } catch (err) {
+          console.error(err);
+        }
+      }
+      if (options.restart) {
+        restartCameraDecoding();
+      }
+    }
+
     function startCamera() {
       if (state.camera.stream) {
         return;
@@ -761,11 +884,18 @@
         });
         return;
       }
-      if (!state.camera.reader) {
-        state.camera.reader = new ZXing.BrowserMultiFormatReader();
-      }
       setScanStage('initializing');
       stopCamera(true, true);
+      updateCameraHints();
+      if (!state.camera.reader) {
+        state.camera.reader = new ZXing.BrowserMultiFormatReader(state.camera.hints || undefined);
+      } else if (state.camera.hints && typeof state.camera.reader.setHints === 'function') {
+        try {
+          state.camera.reader.setHints(state.camera.hints);
+        } catch (err) {
+          console.error(err);
+        }
+      }
       els.scanPlaceholder.textContent = 'カメラ初期化中…';
       els.scanPlaceholder.classList.remove('hidden');
       const constraints = {
@@ -787,19 +917,8 @@
           setScanStage('ready');
           return state.camera.reader.decodeFromVideoElement(
             els.cameraPreview,
-            (result, err) => {
-              if (!state.camera.stream) {
-                return;
-              }
-              if (result) {
-                handleCameraResult(result.getText());
-              } else if (err instanceof ZXing.NotFoundException) {
-                ensureActiveScanning();
-              } else if (err && !(err instanceof ZXing.NotFoundException)) {
-                console.error(err);
-              }
-            },
-            undefined,
+            handleDecodeLoop,
+            state.camera.hints,
             200
           );
         })
