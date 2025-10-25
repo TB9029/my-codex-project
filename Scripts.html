@@ -78,6 +78,25 @@
       tabPanels: document.querySelectorAll('.tab-panel')
     };
 
+    const GS1_FNC1 = String.fromCharCode(29);
+    // Common GS1 application identifiers derived from GS1 specs and community parsers
+    // such as https://github.com/tony-xlh/GS1-Barcode-Reader.
+    const GS1_AI_SPECS = {
+      '00': { length: 18, key: 'sscc', label: 'SSCC' },
+      '01': { length: 14, key: 'gtin', label: 'GTIN' },
+      '02': { length: 14, key: 'gtinContent', label: 'GTIN(内装)' },
+      '10': { variable: true, min: 1, max: 20, key: 'lot', label: 'ロット' },
+      '11': { length: 6, key: 'productionDate', type: 'date', label: '製造日' },
+      '13': { length: 6, key: 'packDate', type: 'date', label: '包装日' },
+      '15': { length: 6, key: 'bestBefore', type: 'date', label: '賞味期限' },
+      '17': { length: 6, key: 'expiry', type: 'date', label: '期限' },
+      '20': { length: 2, key: 'variant', label: 'バリアント' },
+      '21': { variable: true, min: 1, max: 20, key: 'serial', label: 'シリアル' },
+      '30': { variable: true, min: 1, max: 8, key: 'count', label: '数量' },
+      '37': { variable: true, min: 1, max: 8, key: 'countEach', label: '内包数' },
+      '90': { variable: true, min: 1, max: 30, key: 'internal', label: '内部コード' }
+    };
+
     function init() {
       bindNav();
       bindTabs();
@@ -724,7 +743,9 @@
       clearScanHintTimer();
       if (state.scan.stage !== 'active') return;
       state.scan.hintTimer = setTimeout(() => {
-        showScanHint('読み取りづらい場合は距離や角度、周囲の明るさを調整してください。必要に応じて手入力もご利用いただけます。');
+        const hintMessage =
+          '読み取りづらい場合は距離や角度、周囲の明るさを調整してください。必要に応じて手入力もご利用いただけます。';
+        showScanHint(hintMessage);
       }, delay);
     }
 
@@ -1330,8 +1351,13 @@
       const processingMessage = options.processingMessage || '☁️ 読み取りデータを処理中…';
       const processingTone = options.processingTone || 'info';
       const overlayText = options.processingOverlay || '📤 読み取り中…';
+      const parsed = parseGs1Data(raw);
+      const overlaySubtitle = parsed.summary || (parsed.isGs1 ? parsed.normalized : '');
       setScanStage('processing', { message: processingMessage, tone: processingTone });
-      drawOverlayMessage(overlayText, processingTone);
+      drawOverlayMessage(overlayText, processingTone, overlaySubtitle);
+      if (state.camera.gs1Mode && !parsed.isGs1) {
+        showScanHint('GS1 コードとして認識できませんでした。枠内いっぱいに収め、明るさと角度を調整してください。');
+      }
       if (!navigator.onLine) {
         queueScan(raw);
         showToast('オフラインのためキューに保存しました');
@@ -1340,7 +1366,8 @@
           message: '📦 オフラインのためキューに保存しました（接続復帰で自動送信）',
           tone: 'warning'
         });
-        drawOverlayMessage('📦 オフライン保存', 'warning', 'オンライン復帰後に送信します');
+        const offlineSubtitle = parsed.summary || 'オンライン復帰後に送信します';
+        drawOverlayMessage('📦 オフライン保存', 'warning', offlineSubtitle);
         scheduleReturnToActive(2600);
         return;
       }
@@ -1361,7 +1388,8 @@
               message: '📦 オフラインのためキューに保存しました（接続復帰で自動送信）',
               tone: 'warning'
             });
-            drawOverlayMessage('📦 オフライン保存', 'warning', 'オンライン復帰後に送信します');
+            const offlineSubtitle = parsed.summary || 'オンライン復帰後に送信します';
+            drawOverlayMessage('📦 オフライン保存', 'warning', offlineSubtitle);
             scheduleReturnToActive(2600);
           } else {
             setScanStage('error', {
@@ -1452,8 +1480,203 @@
       }
     }
 
+    function parseGs1Data(raw) {
+      const result = {
+        raw: raw || '',
+        normalized: '',
+        segments: [],
+        data: {},
+        summary: '',
+        errors: [],
+        isGs1: false
+      };
+      if (!raw) {
+        result.errors.push('EMPTY');
+        return result;
+      }
+      let input = String(raw).trim();
+      if (!input) {
+        result.errors.push('EMPTY');
+        return result;
+      }
+      if (/^\]C.*/i.test(input)) {
+        input = input.replace(/^\]C.\s*/, '');
+      }
+      result.normalized = input.replace(/\s+/g, '');
+      const canonical = result.normalized;
+      const segments = [];
+      const seen = new Set();
+      const pushSegment = (ai, value) => {
+        if (!ai || value === undefined || value === null) return;
+        const spec = GS1_AI_SPECS[ai] || { variable: true, key: `ai${ai}`, label: `AI${ai}` };
+        const processed = normalizeGs1Value(ai, value, spec);
+        segments.push({ ai, value: processed.value, label: spec.label || `AI${ai}` });
+        if (spec.key && !seen.has(spec.key)) {
+          result.data[spec.key] = processed.coerced;
+          seen.add(spec.key);
+        } else if (!spec.key) {
+          result.data[`ai${ai}`] = processed.coerced;
+        }
+        if (processed.error) {
+          result.errors.push(processed.error);
+        }
+      };
+
+      if (canonical.includes('(') && canonical.includes(')')) {
+        // Parenthesis-style input such as (01)...(17) from manual entry; this follows
+        // the extraction approach used by libraries like PeterBrockfeld/BarcodeParser.
+        const regex = /\((\d{2,4})\)([^()]*)/g;
+        let match;
+        while ((match = regex.exec(canonical)) !== null) {
+          const ai = match[1];
+          const spec = GS1_AI_SPECS[ai];
+          let value = match[2] || '';
+          if (spec && spec.length) {
+            value = value.slice(0, spec.length);
+          }
+          pushSegment(ai, value);
+        }
+      } else {
+        let cursor = 0;
+        while (cursor < canonical.length) {
+          if (canonical[cursor] === GS1_FNC1) {
+            cursor += 1;
+            continue;
+          }
+          const ai = matchGs1Ai(canonical, cursor);
+          if (!ai) {
+            result.errors.push(`UNKNOWN_AI:${canonical.slice(cursor, cursor + 4)}`);
+            break;
+          }
+          cursor += ai.length;
+          const spec = GS1_AI_SPECS[ai];
+          let value = '';
+          if (spec && spec.length) {
+            value = canonical.slice(cursor, cursor + spec.length);
+            cursor += value.length;
+            if (value.length < spec.length) {
+              result.errors.push(`SHORT_${ai}`);
+            }
+          } else {
+            let end = canonical.indexOf(GS1_FNC1, cursor);
+            if (end === -1) {
+              end = canonical.length;
+            }
+            value = canonical.slice(cursor, end);
+            if (spec && spec.max && value.length > spec.max) {
+              value = value.slice(0, spec.max);
+              result.errors.push(`TRUNCATED_${ai}`);
+              cursor = cursor + spec.max;
+            } else {
+              cursor = end;
+            }
+          }
+          pushSegment(ai, value);
+          if (canonical[cursor] === GS1_FNC1) {
+            cursor += 1;
+          }
+        }
+      }
+
+      if (!segments.length) {
+        return result;
+      }
+
+      result.segments = segments;
+      result.isGs1 = true;
+      result.summary = buildGs1Summary(result.data, segments);
+      return result;
+    }
+
+    function matchGs1Ai(source, start) {
+      const maxLen = Math.min(4, source.length - start);
+      for (let len = maxLen; len >= 2; len--) {
+        const candidate = source.slice(start, start + len);
+        if (GS1_AI_SPECS[candidate]) {
+          return candidate;
+        }
+        if (len > 2 && /^\d{3,4}$/.test(candidate)) {
+          return candidate;
+        }
+      }
+      const fallback = source.slice(start, start + 2);
+      return /^\d{2}$/.test(fallback) ? fallback : null;
+    }
+
+    function normalizeGs1Value(ai, raw, spec = {}) {
+      let value = String(raw || '').replace(/\s+/g, '');
+      if (!value) {
+        const needsValue = spec.min && spec.min > 0;
+        return { value: '', coerced: '', error: needsValue ? `EMPTY_${ai}` : null };
+      }
+      if (spec.length && value.length > spec.length) {
+        value = value.slice(0, spec.length);
+      }
+      if (spec.variable && spec.max && value.length > spec.max) {
+        value = value.slice(0, spec.max);
+      }
+      if (spec.type === 'date') {
+        const iso = convertGs1Date(value);
+        return {
+          value: iso || value,
+          coerced: iso || value,
+          error: iso ? null : `DATE_${ai}`
+        };
+      }
+      if (spec.key === 'gtin' && value.length === 14) {
+        return { value, coerced: value };
+      }
+      return { value, coerced: value };
+    }
+
+    function convertGs1Date(value) {
+      if (!/^\d{6}$/.test(value)) {
+        return null;
+      }
+      const yy = Number(value.slice(0, 2));
+      const mm = Number(value.slice(2, 4));
+      const dd = Number(value.slice(4, 6));
+      if (Number.isNaN(mm) || mm < 1 || mm > 12) {
+        return null;
+      }
+      const year = 2000 + yy;
+      const date = new Date(Date.UTC(year, mm - 1, dd));
+      if (
+        date.getUTCFullYear() !== year ||
+        date.getUTCMonth() !== mm - 1 ||
+        date.getUTCDate() !== dd
+      ) {
+        return null;
+      }
+      return `${year}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+    }
+
+    function buildGs1Summary(data, segments) {
+      const parts = [];
+      if (data.gtin) {
+        parts.push(`GTIN ${data.gtin}`);
+      }
+      if (data.expiry) {
+        parts.push(`期限 ${data.expiry}`);
+      } else if (data.bestBefore) {
+        parts.push(`賞味期限 ${data.bestBefore}`);
+      }
+      if (data.lot) {
+        parts.push(`ロット ${data.lot}`);
+      }
+      if (data.serial) {
+        parts.push(`シリアル ${data.serial}`);
+      }
+      if (!parts.length && segments.length) {
+        const first = segments[0];
+        parts.push(`${first.label || `AI${first.ai}`} ${first.value}`);
+      }
+      return parts.join(' / ');
+    }
+
     function queueScan(raw) {
-      state.offlineQueue.push({ raw, timestamp: new Date().toISOString() });
+      const parsed = parseGs1Data(raw);
+      state.offlineQueue.push({ raw, parsed, timestamp: new Date().toISOString() });
       saveQueue();
     }
 
@@ -1495,13 +1718,23 @@
         return;
       }
       const fragment = document.createDocumentFragment();
+      let mutated = false;
       state.offlineQueue.forEach(item => {
         const li = document.createElement('li');
         li.className = 'queue-item';
-        li.textContent = `${item.timestamp} : ${item.raw}`;
+        const parsed = item.parsed || parseGs1Data(item.raw);
+        if (!item.parsed) {
+          item.parsed = parsed;
+          mutated = true;
+        }
+        const summary = parsed && parsed.summary ? `（${parsed.summary}）` : '';
+        li.textContent = `${item.timestamp} : ${item.raw}${summary}`;
         fragment.appendChild(li);
       });
       els.queueList.appendChild(fragment);
+      if (mutated) {
+        saveQueue();
+      }
     }
 
     function handleOnline() {
@@ -1575,7 +1808,19 @@
       try {
         const text = localStorage.getItem('gs1-offline-queue');
         if (!text) return [];
-        return JSON.parse(text);
+        const parsed = JSON.parse(text);
+        if (!Array.isArray(parsed)) {
+          return [];
+        }
+        return parsed.map(item => {
+          if (!item || typeof item !== 'object') {
+            return null;
+          }
+          if (!item.parsed && item.raw) {
+            item.parsed = parseGs1Data(item.raw);
+          }
+          return item;
+        }).filter(Boolean);
       } catch (e) {
         console.error(e);
         return [];
