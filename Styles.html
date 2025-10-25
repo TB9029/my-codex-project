@@ -288,6 +288,45 @@
     font-weight: 700;
   }
 
+  .scan-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+
+  .scan-top-headings {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .scan-mode-label {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--color-muted);
+    font-weight: 600;
+  }
+
+  .scan-top-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .scan-mode-btn {
+    white-space: nowrap;
+    min-width: 150px;
+  }
+
+  .scan-mode-btn[aria-pressed='false'] {
+    background: rgba(255, 255, 255, 0.08);
+  }
+
   .camera-container {
     position: relative;
     border-radius: var(--radius-lg);
