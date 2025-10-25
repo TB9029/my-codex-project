@@ -14,13 +14,24 @@
         stream: null,
         deviceId: null,
         gs1Mode: true,
-        hints: null
+        hints: null,
+        frameCanvas: null,
+        frameContext: null,
+        roiCanvas: null,
+        roiContext: null,
+        rotateCanvas90: null,
+        rotateContext90: null,
+        rotateCanvas270: null,
+        rotateContext270: null
       },
       scan: {
         stage: 'idle',
         hintTimer: null,
         overlayTimer: null,
-        resetTimer: null
+        resetTimer: null,
+        frameHandle: null,
+        frameTimer: null,
+        frameAttempts: 0
       }
     };
 
@@ -79,6 +90,7 @@
       bindManualInput();
       bindScanControls();
       bindNetworkEvents();
+      prepareScanCanvases();
       window.addEventListener('resize', syncOverlaySize);
       if (els.cameraPreview) {
         els.cameraPreview.addEventListener('loadedmetadata', syncOverlaySize);
@@ -320,6 +332,33 @@
       updateGs1ModeUI();
       if (els.gs1ModeToggle) {
         els.gs1ModeToggle.addEventListener('click', toggleGs1Mode);
+      }
+    }
+
+    function prepareScanCanvases() {
+      if (!state.camera.frameCanvas) {
+        state.camera.frameCanvas = document.createElement('canvas');
+        state.camera.frameContext = state.camera.frameCanvas.getContext('2d', {
+          willReadFrequently: true
+        });
+      }
+      if (!state.camera.roiCanvas) {
+        state.camera.roiCanvas = document.createElement('canvas');
+        state.camera.roiContext = state.camera.roiCanvas.getContext('2d', {
+          willReadFrequently: true
+        });
+      }
+      if (!state.camera.rotateCanvas90) {
+        state.camera.rotateCanvas90 = document.createElement('canvas');
+        state.camera.rotateContext90 = state.camera.rotateCanvas90.getContext('2d', {
+          willReadFrequently: true
+        });
+      }
+      if (!state.camera.rotateCanvas270) {
+        state.camera.rotateCanvas270 = document.createElement('canvas');
+        state.camera.rotateContext270 = state.camera.rotateCanvas270.getContext('2d', {
+          willReadFrequently: true
+        });
       }
     }
 
@@ -660,10 +699,12 @@
       state.scan.stage = stage;
       updateScanStatus(message, tone);
       if (stage === 'active') {
-        clearOverlay();
+        syncOverlaySize();
+        drawScanReticle();
         scheduleScanHint();
       } else if (stage === 'ready') {
-        clearOverlay();
+        syncOverlaySize();
+        drawScanReticle();
         clearScanHint();
       } else if (stage === 'idle' || stage === 'initializing') {
         clearScanHint();
@@ -744,6 +785,54 @@
         canvas.width = width;
         canvas.height = height;
       }
+      if (state.scan.stage === 'active' || state.scan.stage === 'ready') {
+        drawScanReticle();
+      }
+    }
+
+    function drawScanReticle() {
+      if (!els.cameraOverlay) return;
+      const canvas = els.cameraOverlay;
+      const ctx = canvas.getContext('2d');
+      if (!ctx || !canvas.width || !canvas.height) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const region = getScanRegion(canvas.width, canvas.height);
+      const maskColor = 'rgba(5, 8, 13, 0.52)';
+      ctx.fillStyle = maskColor;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(region.x, region.y, region.width, region.height);
+      const lineWidth = Math.max(2, canvas.width * 0.005);
+      const corner = Math.min(region.width, region.height) * 0.18;
+      ctx.lineWidth = lineWidth;
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+      ctx.beginPath();
+      // top-left corner
+      ctx.moveTo(region.x, region.y + corner);
+      ctx.lineTo(region.x, region.y);
+      ctx.lineTo(region.x + corner, region.y);
+      // top-right corner
+      ctx.moveTo(region.x + region.width - corner, region.y);
+      ctx.lineTo(region.x + region.width, region.y);
+      ctx.lineTo(region.x + region.width, region.y + corner);
+      // bottom-right corner
+      ctx.moveTo(region.x + region.width, region.y + region.height - corner);
+      ctx.lineTo(region.x + region.width, region.y + region.height);
+      ctx.lineTo(region.x + region.width - corner, region.y + region.height);
+      // bottom-left corner
+      ctx.moveTo(region.x + corner, region.y + region.height);
+      ctx.lineTo(region.x, region.y + region.height);
+      ctx.lineTo(region.x, region.y + region.height - corner);
+      ctx.stroke();
+      ctx.setLineDash([lineWidth * 2, lineWidth * 2]);
+      ctx.lineDashOffset = 0;
+      ctx.beginPath();
+      ctx.moveTo(region.x + region.width * 0.5, region.y);
+      ctx.lineTo(region.x + region.width * 0.5, region.y + region.height);
+      ctx.moveTo(region.x, region.y + region.height * 0.5);
+      ctx.lineTo(region.x + region.width, region.y + region.height * 0.5);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
 
     function drawOverlayMessage(title, tone = 'info', subtitle = '') {
@@ -855,10 +944,26 @@
       const hints = new Map();
       hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, Array.from(formats));
       hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      hints.set(ZXing.DecodeHintType.ALSO_INVERTED, true);
+      hints.set(ZXing.DecodeHintType.CHARACTER_SET, 'UTF-8');
       if (state.camera.gs1Mode) {
         hints.set(ZXing.DecodeHintType.ASSUME_GS1, true);
       }
       state.camera.hints = hints;
+      if (window.ZXing && ZXing.MultiFormatReader) {
+        if (!state.camera.reader) {
+          state.camera.reader = new ZXing.MultiFormatReader();
+        }
+        if (state.camera.reader && typeof state.camera.reader.setHints === 'function') {
+          try {
+            state.camera.reader.setHints(hints);
+          } catch (err) {
+            console.error(err);
+          }
+        }
+      }
+      if (options.restart) {
+        restartFrameProcessing();
       if (state.camera.reader && typeof state.camera.reader.setHints === 'function') {
         try {
           state.camera.reader.setHints(hints);
@@ -887,6 +992,7 @@
       setScanStage('initializing');
       stopCamera(true, true);
       updateCameraHints();
+      prepareScanCanvases();
       if (!state.camera.reader) {
         state.camera.reader = new ZXing.BrowserMultiFormatReader(state.camera.hints || undefined);
       } else if (state.camera.hints && typeof state.camera.reader.setHints === 'function') {
@@ -898,10 +1004,22 @@
       }
       els.scanPlaceholder.textContent = 'カメラ初期化中…';
       els.scanPlaceholder.classList.remove('hidden');
+      const supported = navigator.mediaDevices.getSupportedConstraints
+        ? navigator.mediaDevices.getSupportedConstraints()
+        : {};
+      const videoConstraints = {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
+      };
+      if (supported.focusMode) {
+        videoConstraints.focusMode = 'continuous';
+      }
+      if (supported.torch) {
+        videoConstraints.advanced = [{ torch: false }];
+      }
       const constraints = {
-        video: {
-          facingMode: { ideal: 'environment' }
-        },
+        video: videoConstraints,
         audio: false
       };
       navigator.mediaDevices
@@ -915,6 +1033,7 @@
           els.scanPlaceholder.classList.add('hidden');
           syncOverlaySize();
           setScanStage('ready');
+          beginFrameProcessing();
           return state.camera.reader.decodeFromVideoElement(
             els.cameraPreview,
             handleDecodeLoop,
@@ -978,6 +1097,7 @@
       if (els.cameraPreview) {
         els.cameraPreview.srcObject = null;
       }
+      stopFrameProcessing();
       clearScanTimers();
       clearOverlay();
       if (!keepPlaceholder && els.scanPlaceholder) {
@@ -996,6 +1116,214 @@
       }
       state.lastScanTime = now;
       processScan(text);
+      scheduleFrameScan(420);
+    }
+
+    function beginFrameProcessing() {
+      if (!state.camera.stream || !els.cameraPreview) {
+        return;
+      }
+      if (!window.ZXing || !ZXing.MultiFormatReader) {
+        return;
+      }
+      if (!state.camera.reader) {
+        state.camera.reader = new ZXing.MultiFormatReader();
+        if (state.camera.hints && state.camera.reader.setHints) {
+          try {
+            state.camera.reader.setHints(state.camera.hints);
+          } catch (err) {
+            console.error(err);
+          }
+        }
+      }
+      state.scan.frameAttempts = 0;
+      setScanStage('active');
+      scheduleFrameScan(0);
+    }
+
+    function restartFrameProcessing() {
+      stopFrameProcessing();
+      if (state.camera.stream) {
+        if (state.scan.stage === 'active' || state.scan.stage === 'ready') {
+          setScanStage('active');
+        }
+        scheduleFrameScan(120);
+      }
+    }
+
+    function stopFrameProcessing() {
+      if (state.scan.frameHandle) {
+        cancelAnimationFrame(state.scan.frameHandle);
+        state.scan.frameHandle = null;
+      }
+      if (state.scan.frameTimer) {
+        clearTimeout(state.scan.frameTimer);
+        state.scan.frameTimer = null;
+      }
+      state.scan.frameAttempts = 0;
+    }
+
+    function scheduleFrameScan(delay = 0) {
+      if (!state.camera.stream || !els.cameraPreview) {
+        return;
+      }
+      if (state.scan.frameHandle) {
+        cancelAnimationFrame(state.scan.frameHandle);
+        state.scan.frameHandle = null;
+      }
+      if (state.scan.frameTimer) {
+        clearTimeout(state.scan.frameTimer);
+        state.scan.frameTimer = null;
+      }
+      if (delay > 0) {
+        state.scan.frameTimer = setTimeout(() => {
+          state.scan.frameTimer = null;
+          state.scan.frameHandle = requestAnimationFrame(scanFrame);
+        }, delay);
+      } else {
+        state.scan.frameHandle = requestAnimationFrame(scanFrame);
+      }
+    }
+
+    function scanFrame() {
+      state.scan.frameHandle = null;
+      if (!state.camera.stream || !els.cameraPreview) {
+        return;
+      }
+      const video = els.cameraPreview;
+      if (!video.videoWidth || !video.videoHeight) {
+        scheduleFrameScan(120);
+        return;
+      }
+      prepareScanCanvases();
+      const frameCanvas = state.camera.frameCanvas;
+      const frameCtx = state.camera.frameContext;
+      frameCanvas.width = video.videoWidth;
+      frameCanvas.height = video.videoHeight;
+      frameCtx.drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height);
+      const region = getScanRegion(frameCanvas.width, frameCanvas.height);
+      const roiCanvas = state.camera.roiCanvas;
+      const roiCtx = state.camera.roiContext;
+      roiCanvas.width = region.width;
+      roiCanvas.height = region.height;
+      roiCtx.save();
+      roiCtx.filter = 'contrast(140%) brightness(120%)';
+      roiCtx.drawImage(
+        frameCanvas,
+        region.x,
+        region.y,
+        region.width,
+        region.height,
+        0,
+        0,
+        region.width,
+        region.height
+      );
+      roiCtx.restore();
+      const rotateCanvas90 = state.camera.rotateCanvas90;
+      const rotateCtx90 = state.camera.rotateContext90;
+      rotateCanvas90.width = roiCanvas.height;
+      rotateCanvas90.height = roiCanvas.width;
+      rotateCtx90.save();
+      rotateCtx90.clearRect(0, 0, rotateCanvas90.width, rotateCanvas90.height);
+      rotateCtx90.translate(rotateCanvas90.width / 2, rotateCanvas90.height / 2);
+      rotateCtx90.rotate(Math.PI / 2);
+      rotateCtx90.drawImage(roiCanvas, -roiCanvas.width / 2, -roiCanvas.height / 2);
+      rotateCtx90.restore();
+      const rotateCanvas270 = state.camera.rotateCanvas270;
+      const rotateCtx270 = state.camera.rotateContext270;
+      rotateCanvas270.width = roiCanvas.height;
+      rotateCanvas270.height = roiCanvas.width;
+      rotateCtx270.save();
+      rotateCtx270.clearRect(0, 0, rotateCanvas270.width, rotateCanvas270.height);
+      rotateCtx270.translate(rotateCanvas270.width / 2, rotateCanvas270.height / 2);
+      rotateCtx270.rotate(-Math.PI / 2);
+      rotateCtx270.drawImage(roiCanvas, -roiCanvas.width / 2, -roiCanvas.height / 2);
+      rotateCtx270.restore();
+      const result = tryDecodeFromCanvases();
+      if (result && result.getText) {
+        ensureActiveScanning();
+        handleCameraResult(result.getText());
+        return;
+      }
+      state.scan.frameAttempts += 1;
+      if (state.scan.frameAttempts > 6) {
+        state.scan.frameAttempts = 0;
+        ensureActiveScanning();
+      }
+      scheduleFrameScan(0);
+    }
+
+    function getScanRegion(width, height) {
+      const portrait = height >= width;
+      const regionWidth = portrait ? width * 0.92 : width * 0.7;
+      const regionHeight = portrait ? height * 0.42 : height * 0.66;
+      const x = Math.max(0, (width - regionWidth) / 2);
+      const y = Math.max(0, (height - regionHeight) / 2);
+      return {
+        x,
+        y,
+        width: Math.floor(regionWidth),
+        height: Math.floor(regionHeight)
+      };
+    }
+
+    function tryDecodeFromCanvases() {
+      if (
+        !window.ZXing ||
+        !state.camera.reader ||
+        !state.camera.roiCanvas ||
+        !ZXing.HTMLCanvasElementLuminanceSource ||
+        !ZXing.BinaryBitmap
+      ) {
+        return null;
+      }
+      const canvases = [
+        state.camera.roiCanvas,
+        state.camera.rotateCanvas90,
+        state.camera.rotateCanvas270,
+        state.camera.frameCanvas
+      ];
+      const attempts = [];
+      canvases.forEach(canvas => {
+        if (!canvas || !canvas.width || !canvas.height) return;
+        try {
+          const base = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
+          attempts.push(base);
+          if (typeof base.invert === 'function') {
+            attempts.push(base.invert());
+          }
+        } catch (err) {
+          console.debug(err);
+        }
+      });
+      const binarizers = [ZXing.HybridBinarizer, ZXing.GlobalHistogramBinarizer].filter(Boolean);
+      for (const source of attempts) {
+        for (const Binarizer of binarizers) {
+          try {
+            const binary = new ZXing.BinaryBitmap(new Binarizer(source));
+            if (state.camera.reader.setHints && state.camera.hints) {
+              state.camera.reader.setHints(state.camera.hints);
+            }
+            const result = state.camera.reader.decodeWithState(binary);
+            if (result) {
+              state.camera.reader.reset();
+              return result;
+            }
+          } catch (err) {
+            if (!(err instanceof ZXing.NotFoundException)) {
+              console.debug(err);
+            }
+          } finally {
+            try {
+              state.camera.reader.reset();
+            } catch (resetErr) {
+              console.debug(resetErr);
+            }
+          }
+        }
+      }
+      return null;
     }
 
     function processScan(raw, options = {}) {
